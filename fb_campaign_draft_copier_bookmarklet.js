@@ -8,7 +8,7 @@
   const Config = {
     VERSION: "2026.05.06-test.1",
     API_VERSION: "v23.0",
-    API_URL: "https://adsmanager-graph.facebook.com/v23.0/",
+    API_URL: "https://graph.facebook.com/v23.0/",
     ROOT_ID: "ywb-campaign-copier-root",
     STYLE_ID: "ywb-campaign-copier-styles"
   };
@@ -181,11 +181,18 @@
       this.accounts = [];
     }
 
-    async loadAll() {
-      logger.info("Загружаю рекламные аккаунты...");
-      const accounts = await API.getAllPages("me/adaccounts", "fields=id,account_id,name,account_status,currency,timezone_name&limit=200");
 
-      this.accounts = accounts.map(acc => ({
+    async loadViaMeAdAccounts() {
+      return API.getAllPages("me/adaccounts", "fields=id,account_id,name,account_status,currency,timezone_name&limit=200");
+    }
+
+    async loadViaMeFields() {
+      const result = await API.get("me", "fields=adaccounts.limit(200){id,account_id,name,account_status,currency,timezone_name}");
+      return Array.isArray(result?.adaccounts?.data) ? result.adaccounts.data : [];
+    }
+
+    normalizeAccounts(accounts) {
+      return accounts.map(acc => ({
         id: String(acc.id || `act_${acc.account_id}`).replace("act_", ""),
         account_id: acc.account_id || String(acc.id || "").replace("act_", ""),
         name: acc.name || acc.account_id || acc.id,
@@ -193,6 +200,31 @@
         currency: acc.currency,
         timezone_name: acc.timezone_name
       }));
+    }
+
+    async loadAll() {
+      logger.info("Загружаю рекламные аккаунты...");
+
+      let accounts = [];
+      try {
+        accounts = await this.loadViaMeAdAccounts();
+      } catch (error) {
+        logger.warning(`me/adaccounts недоступен: ${error.message || error}`);
+      }
+
+      if (!accounts.length) {
+        try {
+          accounts = await this.loadViaMeFields();
+        } catch (error) {
+          logger.warning(`me?fields=adaccounts недоступен: ${error.message || error}`);
+        }
+      }
+
+      this.accounts = this.normalizeAccounts(accounts);
+
+      if (!this.accounts.length) {
+        logger.warning("Аккаунты не найдены. Убедись, что открыт Ads Manager нужного Business и есть права ads_management/ads_read.");
+      }
 
       logger.success(`Загружено аккаунтов: ${this.accounts.length}`);
       return this.accounts;
@@ -244,7 +276,13 @@
         "source_campaign_id"
       ].join(",");
 
-      const campaigns = await API.getAllPages(`act_${accountId}/campaigns`, `fields=${fields}&limit=200`);
+      const statusFilter = encodeURIComponent(JSON.stringify(["ACTIVE","PAUSED","ARCHIVED","DELETED","IN_PROCESS","WITH_ISSUES"]));
+      let campaigns = await API.getAllPages(`act_${accountId}/campaigns`, `fields=${fields}&effective_status=${statusFilter}&limit=200`);
+
+      if (!campaigns.length) {
+        logger.warning("Кампании не найдены через effective_status фильтр. Пробую запрос без фильтра...");
+        campaigns = await API.getAllPages(`act_${accountId}/campaigns`, `fields=${fields}&limit=200`);
+      }
       logger.success(`Найдено кампаний: ${campaigns.length}`);
       return campaigns;
     }
