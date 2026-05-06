@@ -8,7 +8,7 @@
   const Config = {
     VERSION: "2026.05.06-test.1",
     API_VERSION: "v23.0",
-    API_URL: "https://adsmanager-graph.facebook.com/v23.0/",
+    API_URL: "https://graph.facebook.com/v23.0/",
     ROOT_ID: "ywb-campaign-copier-root",
     STYLE_ID: "ywb-campaign-copier-styles"
   };
@@ -42,6 +42,40 @@
     constructor() {
       this.apiUrl = Config.API_URL;
       this.requestTimeoutMs = 45000;
+      this.nativeFetch = typeof window.fetch === "function" ? window.fetch.bind(window) : null;
+    }
+
+    async fetchWithFallback(finalUrl, options) {
+      if (this.nativeFetch) {
+        return this.nativeFetch(finalUrl, options);
+      }
+
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open(options?.method || "GET", finalUrl, true);
+        xhr.withCredentials = true;
+        xhr.onload = () => {
+          const headers = new Headers();
+          const rawHeaders = xhr.getAllResponseHeaders().trim().split(/[\r\n]+/);
+          rawHeaders.forEach(line => {
+            const parts = line.split(": ");
+            const header = parts.shift();
+            const value = parts.join(": ");
+            if (header) headers.append(header, value);
+          });
+
+          resolve(new Response(xhr.responseText, {
+            status: xhr.status,
+            statusText: xhr.statusText,
+            headers
+          }));
+        };
+        xhr.onerror = () => reject(new Error("XHR network error"));
+        if (options?.headers) {
+          Object.entries(options.headers).forEach(([k, v]) => xhr.setRequestHeader(k, v));
+        }
+        xhr.send(options?.body || null);
+      });
     }
 
     getAccessToken() {
@@ -62,7 +96,7 @@
 
       try {
         const response = await Promise.race([
-          window.fetch.call(window, finalUrl, options),
+          this.fetchWithFallback(finalUrl, options),
           timeoutPromise
         ]);
 
@@ -181,11 +215,48 @@
       this.accounts = [];
     }
 
-    async loadAll() {
-      logger.info("Загружаю рекламные аккаунты...");
-      const accounts = await API.getAllPages("me/adaccounts", "fields=id,account_id,name,account_status,currency,timezone_name&limit=200");
 
-      this.accounts = accounts.map(acc => ({
+    async loadViaMeAdAccounts() {
+      return API.getAllPages("me/adaccounts", "fields=id,account_id,name,account_status,currency,timezone_name&limit=200");
+    }
+
+    async loadViaMeFields() {
+      const result = await API.get("me", "fields=adaccounts.limit(200){id,account_id,name,account_status,currency,timezone_name}");
+      return Array.isArray(result?.adaccounts?.data) ? result.adaccounts.data : [];
+    }
+
+
+    discoverAccountsFromPage() {
+      const ids = new Set();
+
+      const params = new URLSearchParams(window.location.search);
+      const actFromUrl = params.get("act");
+      if (actFromUrl && /^\d+$/.test(actFromUrl)) ids.add(actFromUrl);
+
+      const hash = window.location.hash || "";
+      const hashAct = hash.match(/(?:[?#&]|^)act=(\d+)/);
+      if (hashAct?.[1]) ids.add(hashAct[1]);
+
+      const html = document.documentElement?.innerHTML || "";
+      const matches = html.match(/act[_=](\d{8,})/g) || [];
+      for (const m of matches) {
+        const id = (m.match(/(\d{8,})/) || [])[1];
+        if (id) ids.add(id);
+      }
+
+      return Array.from(ids).map(id => ({
+        id,
+        account_id: id,
+        name: `Account ${id}`,
+        status: null,
+        currency: null,
+        timezone_name: null,
+        source: "page_context"
+      }));
+    }
+
+    normalizeAccounts(accounts) {
+      return accounts.map(acc => ({
         id: String(acc.id || `act_${acc.account_id}`).replace("act_", ""),
         account_id: acc.account_id || String(acc.id || "").replace("act_", ""),
         name: acc.name || acc.account_id || acc.id,
@@ -193,6 +264,44 @@
         currency: acc.currency,
         timezone_name: acc.timezone_name
       }));
+    }
+
+    async loadAll() {
+      logger.info("Загружаю рекламные аккаунты...");
+
+      let accounts = [];
+      try {
+        accounts = await this.loadViaMeAdAccounts();
+      } catch (error) {
+        logger.warning(`me/adaccounts недоступен: ${error.message || error}`);
+      }
+
+      if (!accounts.length) {
+        try {
+          accounts = await this.loadViaMeFields();
+        } catch (error) {
+          logger.warning(`me?fields=adaccounts недоступен: ${error.message || error}`);
+        }
+      }
+
+      const normalizedApiAccounts = this.normalizeAccounts(accounts);
+      const pageAccounts = this.discoverAccountsFromPage();
+
+      const dedup = new Map();
+      [...normalizedApiAccounts, ...pageAccounts].forEach(acc => {
+        if (!acc?.account_id) return;
+        if (!dedup.has(acc.account_id)) dedup.set(acc.account_id, acc);
+      });
+
+      this.accounts = Array.from(dedup.values());
+
+      if (!normalizedApiAccounts.length && pageAccounts.length) {
+        logger.warning(`API не вернул аккаунты. Использую аккаунты из контекста страницы: ${pageAccounts.length}.`);
+      }
+
+      if (!this.accounts.length) {
+        logger.warning("Аккаунты не найдены ни через API, ни в контексте страницы. Открой нужный рекламный кабинет и обнови страницу Ads Manager.");
+      }
 
       logger.success(`Загружено аккаунтов: ${this.accounts.length}`);
       return this.accounts;
@@ -222,29 +331,41 @@
     async loadCampaigns(accountId) {
       logger.info(`Загружаю кампании из ${accountId}...`);
 
-      const fields = [
-        "id",
-        "name",
-        "objective",
-        "status",
-        "configured_status",
-        "effective_status",
-        "buying_type",
-        "special_ad_categories",
-        "special_ad_category_country",
-        "bid_strategy",
-        "daily_budget",
-        "lifetime_budget",
-        "budget_remaining",
-        "spend_cap",
-        "start_time",
-        "stop_time",
-        "smart_promotion_type",
-        "is_skadnetwork_attribution",
-        "source_campaign_id"
+      const safeFields = ["id", "name", "status", "configured_status", "effective_status", "objective"].join(",");
+      const extendedFields = [
+        "id", "name", "objective", "status", "configured_status", "effective_status", "buying_type",
+        "special_ad_categories", "special_ad_category_country", "bid_strategy", "daily_budget", "lifetime_budget",
+        "budget_remaining", "spend_cap", "start_time", "stop_time", "smart_promotion_type",
+        "is_skadnetwork_attribution", "source_campaign_id"
       ].join(",");
 
-      const campaigns = await API.getAllPages(`act_${accountId}/campaigns`, `fields=${fields}&limit=200`);
+      const statusFilter = encodeURIComponent(JSON.stringify(["ACTIVE", "PAUSED", "ARCHIVED", "DELETED", "IN_PROCESS", "WITH_ISSUES"]));
+      let campaigns = [];
+
+      try {
+        campaigns = await API.getAllPages(`act_${accountId}/campaigns`, `fields=${safeFields}&effective_status=${statusFilter}&limit=200`);
+      } catch (error) {
+        logger.warning(`Запрос кампаний с фильтром не удался: ${error.message || error}`);
+      }
+
+      if (!campaigns.length) {
+        try {
+          logger.warning("Кампании не найдены через фильтр. Пробую безопасный запрос без фильтра...");
+          campaigns = await API.getAllPages(`act_${accountId}/campaigns`, `fields=${safeFields}&limit=200`);
+        } catch (error) {
+          logger.warning(`Безопасный запрос без фильтра не удался: ${error.message || error}`);
+        }
+      }
+
+      if (campaigns.length) {
+        try {
+          const extended = await API.getAllPages(`act_${accountId}/campaigns`, `fields=${extendedFields}&limit=200`);
+          if (extended.length) campaigns = extended;
+        } catch (_error) {
+          logger.warning("Расширенные поля кампаний недоступны, продолжаю с базовым набором.");
+        }
+      }
+
       logger.success(`Найдено кампаний: ${campaigns.length}`);
       return campaigns;
     }
@@ -735,6 +856,22 @@
       return section;
     }
 
+    renderDebugInfo() {
+      const section = document.createElement("div");
+      section.className = "section";
+
+      const label = document.createElement("label");
+      label.textContent = "Debug:";
+
+      const box = document.createElement("div");
+      box.className = "hint";
+      const sample = this.accounts.slice(0, 5).map(a => a.account_id).join(", ") || "none";
+      box.textContent = `accounts=${this.accounts.length}; sample=${sample}`;
+
+      section.append(label, box);
+      return section;
+    }
+
     log(message, type = "info") {
       if (!this.logArea) return;
 
@@ -753,18 +890,25 @@
     async show() {
       this.ensureStyles();
       const root = this.createRoot();
+      this.accounts = accountManager.getAll();
 
       const sourceSelect = document.createElement("select");
       sourceSelect.id = "ywbSourceAccountSelect";
       sourceSelect.onchange = async () => {
-        this.selectedSourceAccountId = sourceSelect.value;
-        this.selectedCampaignId = "";
-        this.campaigns = [];
-        this.refreshCampaignSelect();
+        try {
+          this.selectedSourceAccountId = sourceSelect.value;
+          this.selectedCampaignId = "";
+          this.campaigns = [];
+          this.refreshCampaignSelect();
 
-        if (!this.selectedSourceAccountId) return;
-        this.campaigns = await campaignCopier.loadCampaigns(this.selectedSourceAccountId);
-        this.refreshCampaignSelect();
+          if (!this.selectedSourceAccountId) return;
+          this.campaigns = await campaignCopier.loadCampaigns(this.selectedSourceAccountId);
+          this.refreshCampaignSelect();
+        } catch (error) {
+          this.campaigns = [];
+          this.refreshCampaignSelect();
+          logger.error(`Не удалось загрузить кампании: ${error.message || error}`);
+        }
       };
 
       const campaignSelect = document.createElement("select");
@@ -849,10 +993,18 @@
         copyAdsWrapper,
         runButton,
         copyBookmarkletButton,
+        this.renderDebugInfo(),
         this.createLogArea()
       );
 
       document.body.appendChild(root);
+
+      setTimeout(() => {
+        this.accounts = accountManager.getAll();
+        this.fillAccountSelect(sourceSelect, "-- Выберите source РК --");
+        this.fillAccountSelect(targetSelect, "-- Выберите target РК --");
+      }, 0);
+
       logger.setUI(this);
       logger.success("Интерфейс готов.");
     }
@@ -920,6 +1072,8 @@
   }
 
   window.ywbInitCampaignCopier = initCampaignCopier;
+  window.ywbAccountManager = accountManager;
+  window.ywbCampaignCopier = campaignCopier;
   window.ywbCopyCampaignCopierBookmarklet = copyScriptAsBase64Bookmarklet;
 
   initCampaignCopier();
