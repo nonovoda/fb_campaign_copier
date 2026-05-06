@@ -225,6 +225,36 @@
       return Array.isArray(result?.adaccounts?.data) ? result.adaccounts.data : [];
     }
 
+
+    discoverAccountsFromPage() {
+      const ids = new Set();
+
+      const params = new URLSearchParams(window.location.search);
+      const actFromUrl = params.get("act");
+      if (actFromUrl && /^\d+$/.test(actFromUrl)) ids.add(actFromUrl);
+
+      const hash = window.location.hash || "";
+      const hashAct = hash.match(/(?:[?#&]|^)act=(\d+)/);
+      if (hashAct?.[1]) ids.add(hashAct[1]);
+
+      const html = document.documentElement?.innerHTML || "";
+      const matches = html.match(/act[_=](\d{8,})/g) || [];
+      for (const m of matches) {
+        const id = (m.match(/(\d{8,})/) || [])[1];
+        if (id) ids.add(id);
+      }
+
+      return Array.from(ids).map(id => ({
+        id,
+        account_id: id,
+        name: `Account ${id}`,
+        status: null,
+        currency: null,
+        timezone_name: null,
+        source: "page_context"
+      }));
+    }
+
     normalizeAccounts(accounts) {
       return accounts.map(acc => ({
         id: String(acc.id || `act_${acc.account_id}`).replace("act_", ""),
@@ -254,10 +284,23 @@
         }
       }
 
-      this.accounts = this.normalizeAccounts(accounts);
+      const normalizedApiAccounts = this.normalizeAccounts(accounts);
+      const pageAccounts = this.discoverAccountsFromPage();
+
+      const dedup = new Map();
+      [...normalizedApiAccounts, ...pageAccounts].forEach(acc => {
+        if (!acc?.account_id) return;
+        if (!dedup.has(acc.account_id)) dedup.set(acc.account_id, acc);
+      });
+
+      this.accounts = Array.from(dedup.values());
+
+      if (!normalizedApiAccounts.length && pageAccounts.length) {
+        logger.warning(`API не вернул аккаунты. Использую аккаунты из контекста страницы: ${pageAccounts.length}.`);
+      }
 
       if (!this.accounts.length) {
-        logger.warning("Аккаунты не найдены. Убедись, что открыт Ads Manager нужного Business и есть права ads_management/ads_read.");
+        logger.warning("Аккаунты не найдены ни через API, ни в контексте страницы. Открой нужный рекламный кабинет и обнови страницу Ads Manager.");
       }
 
       logger.success(`Загружено аккаунтов: ${this.accounts.length}`);
