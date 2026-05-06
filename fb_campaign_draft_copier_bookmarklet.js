@@ -850,6 +850,22 @@
       return section;
     }
 
+    renderDebugInfo() {
+      const section = document.createElement("div");
+      section.className = "section";
+
+      const label = document.createElement("label");
+      label.textContent = "Debug:";
+
+      const box = document.createElement("div");
+      box.className = "hint";
+      const sample = this.accounts.slice(0, 5).map(a => a.account_id).join(", ") || "none";
+      box.textContent = `accounts=${this.accounts.length}; sample=${sample}`;
+
+      section.append(label, box);
+      return section;
+    }
+
     log(message, type = "info") {
       if (!this.logArea) return;
 
@@ -965,10 +981,18 @@
         copyAdsWrapper,
         runButton,
         copyBookmarkletButton,
+        this.renderDebugInfo(),
         this.createLogArea()
       );
 
       document.body.appendChild(root);
+
+      setTimeout(() => {
+        this.accounts = accountManager.getAll();
+        this.fillAccountSelect(sourceSelect, "-- Выберите source РК --");
+        this.fillAccountSelect(targetSelect, "-- Выберите target РК --");
+      }, 0);
+
       logger.setUI(this);
       logger.success("Интерфейс готов.");
     }
@@ -1036,6 +1060,8 @@
   }
 
   window.ywbInitCampaignCopier = initCampaignCopier;
+  window.ywbAccountManager = accountManager;
+  window.ywbCampaignCopier = campaignCopier;
   window.ywbCopyCampaignCopierBookmarklet = copyScriptAsBase64Bookmarklet;
 
   initCampaignCopier();
