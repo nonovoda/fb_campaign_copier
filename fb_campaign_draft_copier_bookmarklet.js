@@ -331,35 +331,41 @@
     async loadCampaigns(accountId) {
       logger.info(`Загружаю кампании из ${accountId}...`);
 
-      const fields = [
-        "id",
-        "name",
-        "objective",
-        "status",
-        "configured_status",
-        "effective_status",
-        "buying_type",
-        "special_ad_categories",
-        "special_ad_category_country",
-        "bid_strategy",
-        "daily_budget",
-        "lifetime_budget",
-        "budget_remaining",
-        "spend_cap",
-        "start_time",
-        "stop_time",
-        "smart_promotion_type",
-        "is_skadnetwork_attribution",
-        "source_campaign_id"
+      const safeFields = ["id", "name", "status", "configured_status", "effective_status", "objective"].join(",");
+      const extendedFields = [
+        "id", "name", "objective", "status", "configured_status", "effective_status", "buying_type",
+        "special_ad_categories", "special_ad_category_country", "bid_strategy", "daily_budget", "lifetime_budget",
+        "budget_remaining", "spend_cap", "start_time", "stop_time", "smart_promotion_type",
+        "is_skadnetwork_attribution", "source_campaign_id"
       ].join(",");
 
-      const statusFilter = encodeURIComponent(JSON.stringify(["ACTIVE","PAUSED","ARCHIVED","DELETED","IN_PROCESS","WITH_ISSUES"]));
-      let campaigns = await API.getAllPages(`act_${accountId}/campaigns`, `fields=${fields}&effective_status=${statusFilter}&limit=200`);
+      const statusFilter = encodeURIComponent(JSON.stringify(["ACTIVE", "PAUSED", "ARCHIVED", "DELETED", "IN_PROCESS", "WITH_ISSUES"]));
+      let campaigns = [];
+
+      try {
+        campaigns = await API.getAllPages(`act_${accountId}/campaigns`, `fields=${safeFields}&effective_status=${statusFilter}&limit=200`);
+      } catch (error) {
+        logger.warning(`Запрос кампаний с фильтром не удался: ${error.message || error}`);
+      }
 
       if (!campaigns.length) {
-        logger.warning("Кампании не найдены через effective_status фильтр. Пробую запрос без фильтра...");
-        campaigns = await API.getAllPages(`act_${accountId}/campaigns`, `fields=${fields}&limit=200`);
+        try {
+          logger.warning("Кампании не найдены через фильтр. Пробую безопасный запрос без фильтра...");
+          campaigns = await API.getAllPages(`act_${accountId}/campaigns`, `fields=${safeFields}&limit=200`);
+        } catch (error) {
+          logger.warning(`Безопасный запрос без фильтра не удался: ${error.message || error}`);
+        }
       }
+
+      if (campaigns.length) {
+        try {
+          const extended = await API.getAllPages(`act_${accountId}/campaigns`, `fields=${extendedFields}&limit=200`);
+          if (extended.length) campaigns = extended;
+        } catch (_error) {
+          logger.warning("Расширенные поля кампаний недоступны, продолжаю с базовым набором.");
+        }
+      }
+
       logger.success(`Найдено кампаний: ${campaigns.length}`);
       return campaigns;
     }
@@ -889,14 +895,20 @@
       const sourceSelect = document.createElement("select");
       sourceSelect.id = "ywbSourceAccountSelect";
       sourceSelect.onchange = async () => {
-        this.selectedSourceAccountId = sourceSelect.value;
-        this.selectedCampaignId = "";
-        this.campaigns = [];
-        this.refreshCampaignSelect();
+        try {
+          this.selectedSourceAccountId = sourceSelect.value;
+          this.selectedCampaignId = "";
+          this.campaigns = [];
+          this.refreshCampaignSelect();
 
-        if (!this.selectedSourceAccountId) return;
-        this.campaigns = await campaignCopier.loadCampaigns(this.selectedSourceAccountId);
-        this.refreshCampaignSelect();
+          if (!this.selectedSourceAccountId) return;
+          this.campaigns = await campaignCopier.loadCampaigns(this.selectedSourceAccountId);
+          this.refreshCampaignSelect();
+        } catch (error) {
+          this.campaigns = [];
+          this.refreshCampaignSelect();
+          logger.error(`Не удалось загрузить кампании: ${error.message || error}`);
+        }
       };
 
       const campaignSelect = document.createElement("select");
