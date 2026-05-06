@@ -868,6 +868,7 @@
     async show() {
       this.ensureStyles();
       const root = this.createRoot();
+      this.accounts = accountManager.getAll();
 
       const sourceSelect = document.createElement("select");
       sourceSelect.id = "ywbSourceAccountSelect";
