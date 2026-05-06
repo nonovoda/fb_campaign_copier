@@ -42,6 +42,40 @@
     constructor() {
       this.apiUrl = Config.API_URL;
       this.requestTimeoutMs = 45000;
+      this.nativeFetch = typeof window.fetch === "function" ? window.fetch.bind(window) : null;
+    }
+
+    async fetchWithFallback(finalUrl, options) {
+      if (this.nativeFetch) {
+        return this.nativeFetch(finalUrl, options);
+      }
+
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open(options?.method || "GET", finalUrl, true);
+        xhr.withCredentials = true;
+        xhr.onload = () => {
+          const headers = new Headers();
+          const rawHeaders = xhr.getAllResponseHeaders().trim().split(/[\r\n]+/);
+          rawHeaders.forEach(line => {
+            const parts = line.split(": ");
+            const header = parts.shift();
+            const value = parts.join(": ");
+            if (header) headers.append(header, value);
+          });
+
+          resolve(new Response(xhr.responseText, {
+            status: xhr.status,
+            statusText: xhr.statusText,
+            headers
+          }));
+        };
+        xhr.onerror = () => reject(new Error("XHR network error"));
+        if (options?.headers) {
+          Object.entries(options.headers).forEach(([k, v]) => xhr.setRequestHeader(k, v));
+        }
+        xhr.send(options?.body || null);
+      });
     }
 
     getAccessToken() {
@@ -62,7 +96,7 @@
 
       try {
         const response = await Promise.race([
-          window.fetch.call(window, finalUrl, options),
+          this.fetchWithFallback(finalUrl, options),
           timeoutPromise
         ]);
 
